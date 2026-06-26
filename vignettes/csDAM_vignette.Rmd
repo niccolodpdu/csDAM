@@ -1,0 +1,341 @@
+---
+title: "csDAM: Cosine Similarity-based Discriminative Analysis of Mixtures"
+author: "Dongping Du"
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    toc: true
+    toc_depth: 3
+vignette: >
+  %\VignetteIndexEntry{csDAM}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+# Overview
+
+Reference-free deconvolution estimates cell-type proportions and cell-type-specific expression profiles from bulk omic data without predefined reference signatures. This vignette introduces **csDAM** (*Cosine Similarity-based Discriminative Analysis of Mixtures*), an unsupervised framework designed for highly mixed samples and weakly separable latent sources.
+
+csDAM follows a directional, cosine-based strategy. Instead of directly factorizing the bulk expression matrix, it first identifies genes whose expression patterns are dominated by a single latent component, then groups genes that vary coherently across samples, and finally selects well-separated candidate directions to estimate proportions using non-negative least squares (NNLS).
+
+This vignette covers:
+
+- the data structure expected by csDAM,
+- the main algorithmic ideas,
+- a complete end-to-end workflow,
+- automatic estimation of the number of latent cell types,
+- practical notes for using the package output.
+
+# Getting started
+
+Load the package and inspect the available functions.
+
+```{r}
+# library(csDAM)
+# ls("package:csDAM")
+```
+
+If you are reading this vignette inside the package source tree, the examples below assume that the package is already installed and available on the search path.
+
+# Data structure
+
+csDAM expects a numeric expression matrix with:
+
+- rows = genes or proteins,
+- columns = samples.
+
+The matrix should already be normalized and aligned across samples. Non-negative values are strongly preferred because the downstream steps are defined for bulk expression profiles.
+
+```{r}
+set.seed(1)
+
+n_genes <- 500
+n_samples <- 20
+K_true <- 4
+
+# Simulated non-negative example expression matrix
+A_true <- matrix(runif(n_samples * K_true, min = 0, max = 1),
+                 nrow = n_samples, ncol = K_true)
+A_true <- A_true / rowSums(A_true)
+
+S_true <- matrix(rexp(n_genes * K_true, rate = 1),
+                 nrow = K_true, ncol = n_genes)
+
+# samples x genes
+expr <- A_true %*% S_true
+expr <- expr + matrix(rnorm(length(expr), sd = 0.02), nrow = nrow(expr))
+expr[expr < 0] <- 0
+
+# genes x samples, which is what csDAM expects
+expr <- t(expr)
+
+rownames(expr) <- paste0("gene", seq_len(n_genes))
+colnames(expr) <- paste0("sample", seq_len(n_samples))
+
+dim(expr)
+expr[1:5, 1:5]
+```
+
+# Method summary
+
+csDAM is built around the idea that genes driven by the same latent cell type vary coherently across samples. When a gene is strongly associated with one latent source, its expression vector across samples becomes concentrated in a subset of samples and aligns with the corresponding direction of that source.
+
+At a high level, csDAM performs the following steps:
+
+1. **Sorting**: for each gene, sort expression values in descending order across samples.
+2. **Comparing**: compare the sorted expression profile with a family of binary reference vectors using cosine similarity.
+3. **Assigning**: assign each gene to the reference support size that maximizes cosine similarity.
+4. **Filtering**: remove genes with diffuse patterns that are unlikely to be cell-type-specific.
+5. **Grouping**: group genes with similar dominant-sample rankings.
+6. **Selecting directions**: choose well-separated candidate directions in angular space.
+7. **Rescaling**: estimate proportions with NNLS and normalize the selected directions.
+
+This cosine-based design is robust when latent components are highly mixed or when classical separability assumptions are weak.
+
+# Step 1. Cosine profile curves
+
+The first csDAM step computes, for each gene, a cosine profile over reference vectors of the form $(1, \dots, 1, 0, \dots, 0)$ with varying support size $k$.
+
+```{r}
+# cos_mat <- cos_iDEG_fast(
+#   expr,
+#   transform = "mean_power",
+#   gamma = 2
+# )
+```
+
+The result is a matrix whose rows are genes and whose columns are the support sizes. A larger cosine value indicates a closer match to a more concentrated sample pattern.
+
+## Why cosine similarity?
+
+The manuscript and supplementary theory show that the cosine score is monotonically related to latent gene-level cell-type specificity under the model assumptions used by csDAM. Intuitively, genes that are more specific to one latent source tend to have expression concentrated in fewer samples, which produces a sharper cosine profile.
+
+# Step 2. Identify candidate cell-type-specific genes
+
+After computing cosine profiles, each gene is assigned to the best matching support size.
+
+```{r}
+# res_k <- select_genes_by_k(expr, cos_mat)
+# names(res_k)
+```
+
+The returned object typically contains:
+
+- `selected_genes`: genes retained as candidates,
+- `best_k`: the optimal support size for each selected gene,
+- `pi`: the permutation that orders samples by decreasing expression for each gene.
+
+Genes with large optimal support sizes are generally diffuse across samples and are removed from later stages.
+
+## Practical note
+
+In the R application code, the default workflow uses the cosine profile matrix together with `best_k` and `pi` to propagate information into grouping and source selection.
+
+# Step 3. Group genes by dominant samples
+
+Genes with similar sample rankings are grouped together, because they are likely driven by the same latent direction.
+
+```{r}
+# groups <- group_genes_by_pi(
+#   cos_mat,
+#   best_k = res_k$best_k,
+#   pi_list = res_k$pi,
+#   top_n = 5
+# )
+```
+
+`top_n` controls how many top-ranked samples are used when defining each gene group. Increasing `top_n` makes grouping stricter; decreasing it makes grouping more permissive.
+
+Groups with too few genes are usually discarded, because they are less stable and less informative for downstream source selection.
+
+# Step 4. Select representative directions
+
+The grouped genes usually define more candidate directions than the true number of cell types. csDAM therefore selects a subset of well-separated directions using cosine distance.
+
+```{r}
+K <- 4
+
+# sel <- select_sources(
+#   groups,
+#   expr,
+#   method = "cosine",
+#   mode = "number",
+#   n_sources = K,
+#   centroid_genes = 1,
+#   per = 1
+# )
+```
+
+## Selection strategy
+
+The package supports several selection modes, including cosine-based and Spearman-based distances. In the main workflow, cosine distance is the default choice because csDAM is explicitly built around angular separation.
+
+A useful working rule is:
+
+- use `method = "cosine"` for the standard workflow,
+- set `per = 1` for proportion estimation,
+- use `centroid_genes = 1` when you want each group to be represented by a single marker gene.
+
+## Why angular distance?
+
+csDAM focuses on direction rather than magnitude. After the row-sum normalization step, absolute scale is no longer the main object of interest, so cosine distance is a natural way to identify distinct latent sources.
+
+# Step 5. Estimate proportions
+
+Once representative marker genes or directions are selected, csDAM rescales them into a proportion matrix using NNLS.
+
+```{r}
+# prop <- proportion_rescaling(expr, sel)
+# A_hat <- prop$A_csCAM
+# dim(A_hat)
+```
+
+The returned proportion matrix has:
+
+- rows = samples,
+- columns = estimated latent cell types.
+
+Depending on the data type and preprocessing, the function name currently returns `A_csCAM` in the application code. In the package documentation and vignette, you can rename the object downstream if you prefer a fully consistent `csDAM` naming scheme.
+
+# Automatic estimation of the number of cell types
+
+csDAM can also estimate the latent dimension automatically.
+
+First rank candidate sources by their distinctness.
+
+```{r}
+# ranks <- rank_sources(
+#   groups,
+#   expr,
+#   method = "cosine",
+#   centroid_genes = 1,
+#   max_n = 20
+# )
+```
+
+Then detect the primary elbow in the score-versus-complexity trade-off.
+
+```{r}
+# K_est <- detect_primary_elbow(
+#   ranks,
+#   gene_weight = 0.1
+# )$primary_rank
+# K_est
+```
+
+The estimated `K_est` can be passed directly to `select_sources()`.
+
+## When to use automatic K estimation
+
+Automatic estimation is especially useful when the number of latent sources is not known in advance, or when you want to compare the data-driven estimate against a biologically expected number of cell types.
+
+# Complete workflow
+
+The full csDAM workflow is shown below.
+
+```{r}
+# cos_mat <- cos_iDEG_fast(expr, transform = "mean_power", gamma = 2)
+# res_k <- select_genes_by_k(expr, cos_mat)
+# groups <- group_genes_by_pi(
+#   cos_mat,
+#   best_k = res_k$best_k,
+#   pi_list = res_k$pi,
+#   top_n = 5
+# )
+# ranks <- rank_sources(groups, expr, method = "cosine", centroid_genes = 1, max_n = 20)
+# K_est <- detect_primary_elbow(ranks, gene_weight = 0.1)$primary_rank
+# sel <- select_sources(
+#   groups,
+#   expr,
+#   method = "cosine",
+#   mode = "number",
+#   n_sources = K_est,
+#   centroid_genes = 1,
+#   per = 1
+# )
+# prop <- proportion_rescaling(expr, sel)
+# A_hat <- prop$A_csCAM
+```
+
+# Interpreting the output
+
+The primary output of csDAM is a proportion matrix, but the intermediate objects are also informative:
+
+- the cosine profile matrix captures how strongly each gene aligns with concentrated reference patterns,
+- the selected gene groups represent candidate latent directions,
+- the ranking of sources can be used to understand how distinct each candidate direction is,
+- the final proportion matrix can be used in downstream statistical analyses.
+
+Typical downstream tasks include:
+
+- comparing cell-type composition across conditions,
+- associating latent proportions with phenotypes,
+- tracking latent programs across disease stages,
+- identifying biologically coherent modules in bulk proteomic or transcriptomic data.
+
+# Practical recommendations
+
+## Preprocessing
+
+csDAM assumes the input has been normalized appropriately. In practice, the best preprocessing depends on the data modality:
+
+- for RNA-seq, use an expression measure that is comparable across samples,
+- for proteomics, use a matrix that has already been imputed and normalized,
+- avoid negative values whenever possible, because the algorithm is designed for non-negative expression profiles.
+
+## Parameter choices
+
+A few reasonable defaults are:
+
+- `transform = "mean_power"`,
+- `gamma = 2`,
+- `top_n = 5`,
+- `method = "cosine"`,
+- `per = 1` for proportion estimation.
+
+For noisier data, a slightly larger `gamma` can emphasize front-loaded expression profiles. For cleaner data, a smaller transformation may be sufficient.
+
+## Output validation
+
+If you have external biological annotations, you can validate csDAM output by checking whether inferred latent directions are enriched for expected cell-type markers or pathways.
+
+# Example: organizing results from the application code
+
+The application script in the package source shows the typical analysis pattern:
+
+```{r eval = FALSE}
+cos_mat <- cos_iDEG_fast(data, transform = "mean_power", gamma = 2)
+res_k <- select_genes_by_k(data, cos_mat)
+
+groups <- group_genes_by_pi(
+  cos_mat, best_k = res_k$best_k, pi_list = res_k$pi, top_n = 5
+)
+
+sel <- select_sources(
+  groups, data, method = "cosine", mode = "number",
+  n_sources = K, centroid_genes = 1, per = 1
+)
+
+A_csDAM_raw <- proportion_rescaling(X, sel)$A_csCAM
+
+ranks <- rank_sources(groups, data, method = "cosine", max_n = 20, centroid_genes = 1)
+
+K_csDAM <- detect_primary_elbow(ranks, gene_weight = 0.1)$primary_index
+```
+
+This vignette follows the same structure, but adds more context around each step so that the package is easier to understand and adapt.
+
+# Session information
+
+```{r}
+sessionInfo()
+```
