@@ -398,7 +398,7 @@ group_genes_by_pi <- function(cos_mat, best_k, pi_list,
 #' **Important note for proportion estimation:**  
 #' The downstream function \code{proportion_rescaling()} requires each selected
 #' source to contain exactly one representative marker gene.  
-#' Therefore, when csCAM is used for proportion estimation, \strong{per must be set to 1}
+#' Therefore, when csDAM is used for proportion estimation, \strong{per must be set to 1}
 #' so that each source contributes only its top-ranked gene.  
 #' Using \code{per > 1} will produce groups containing multiple genes per source,
 #' which makes proportion estimation invalid.
@@ -708,29 +708,29 @@ detect_primary_elbow <- function(df,
 
 #### Rescale A into proportions ####
 #'
-#' @title Rescale csCAM marker-gene expression into cell-type proportions
+#' @title Rescale csDAM marker-gene expression into cell-type proportions
 #'
 #' @description
-#' Construct an estimated proportion matrix from csCAM-selected marker genes.
+#' Construct an estimated proportion matrix from csDAM-selected marker genes.
 #' For each source, one representative marker gene is used to form a sample-by-source
 #' expression matrix, which is then column-rescaled using non-negative least squares
 #' to best approximate row sums of 1 (valid proportion vectors).
 #'
 #' This produces:
 #' \itemize{
-#'   \item a full estimated proportion matrix (\code{A_csCAM})
+#'   \item a full estimated proportion matrix (\code{A_csDAM})
 #'   \item source-specific scaling coefficients (\code{source_scaler})
 #'   \item marker gene identifiers actually used (\code{markers})
 #' }
 #'
 #' @param X A numeric matrix of gene expression with genes in rows and samples in columns.
-#' @param sel A list or character vector representing the csCAM-selected marker genes.
+#' @param sel A list or character vector representing the csDAM-selected marker genes.
 #'   If \code{sel} is a list (e.g., output of \code{select_sources}), the first gene in
 #'   each element is used as the representative marker for that source.
 #'
 #' @return A list containing:
 #' \itemize{
-#'   \item \code{A_csCAM} – estimated sample-by-source proportion matrix
+#'   \item \code{A_csDAM} – estimated sample-by-source proportion matrix
 #'   \item \code{source_scaler} – numeric vector of scaling coefficients, one per source
 #'   \item \code{markers} – character vector of marker genes actually used
 #' }
@@ -738,14 +738,14 @@ detect_primary_elbow <- function(df,
 #' @examples
 #' # Suppose sel is output from select_sources()
 #' # cs_out <- proportion_rescaling(X, sel)
-#' # A_hat <- cs_out$A_csCAM
+#' # A_hat <- cs_out$A_csDAM
 #' # scalers <- cs_out$source_scaler
 #'
 #' @details
 #' **Important note for proportion estimation:**  
 #' The downstream function \code{proportion_rescaling()} requires each selected
 #' source to contain exactly one representative marker gene.  
-#' Therefore, when csCAM is used for proportion estimation, \strong{per must be set to 1}
+#' Therefore, when csDAM is used for proportion estimation, \strong{per must be set to 1}
 #' so that each source contributes only its top-ranked gene.  
 #' Using \code{per > 1} will produce groups containing multiple genes per source,
 #' which makes proportion estimation invalid.
@@ -776,18 +776,18 @@ proportion_rescaling <- function(X, sel) {
   nnls_fit <- nnls::nnls(as.matrix(V), b)
   s_hat <- nnls_fit$x
   
-  # 4. construct A_csCAM = V * diag(s_hat)
-  A_csCAM <- sweep(V, 2, s_hat, `*`)
+  # 4. construct A_csDAM = V * diag(s_hat)
+  A_csDAM <- sweep(V, 2, s_hat, `*`)
   
   # (optional) ensure valid row sums
-  # A_csCAM <- A_csCAM / pmax(rowSums(A_csCAM), 1e-12)
+  # A_csDAM <- A_csDAM / pmax(rowSums(A_csDAM), 1e-12)
   
   # add dimnames
-  rownames(A_csCAM) <- colnames(X)
-  colnames(A_csCAM) <- paste0("csCAM_", seq_len(K))
+  rownames(A_csDAM) <- colnames(X)
+  colnames(A_csDAM) <- paste0("csDAM_", seq_len(K))
   
   list(
-    A_csCAM = A_csCAM,
+    A_csDAM = A_csDAM,
     source_scaler = s_hat,
     markers = marker_genes
   )
